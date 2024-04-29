@@ -1,0 +1,604 @@
+---
+- name: Install Grafana
+  hosts: Servers
+  become: yes  # Ensure that you have sudo privileges
+
+  tasks:
+    - name: Install dependencies
+      package:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - apt-transport-https
+        - software-properties-common
+
+    - name: Add Grafana APT repository key
+      apt_key:
+        url: https://packages.grafana.com/gpg.key
+        state: present
+
+    - name: Add Grafana APT repository
+      apt_repository:
+        repo: deb https://packages.grafana.com/oss/deb stable main
+        state: present
+
+    - name: Update apt and install Grafana
+      apt:
+        update_cache: yes
+        name: grafana
+        state: present
+
+    - name: Start Grafana service
+      service:
+        name: grafana-server
+        state: started
+        enabled: yes
+
+- name: Install and Configure Prometheus, Node Exporter, and Blackbox Exporter
+  hosts: Servers
+  become: yes
+
+  tasks:
+    - name: Download Prometheus package
+      get_url:
+        url: https://github.com/prometheus/prometheus/releases/download/v2.51.1/prometheus-2.51.1.linux-amd64.tar.gz
+        dest: /home/{{ target_username }}/prometheus-2.51.1.linux-amd64.tar.gz
+
+    - name: Extract Prometheus package
+      ansible.builtin.unarchive:
+        src: /home/{{ target_username }}/prometheus-2.51.1.linux-amd64.tar.gz
+        dest: /home/{{ target_username}}/
+        remote_src: yes
+
+    - name: Copy Prometheus binaries to /usr/local/bin
+      copy:
+        src: /home/{{ target_username }}/prometheus-2.51.1.linux-amd64/
+        dest: /usr/local/bin/prometheus/
+        remote_src: yes
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Create Prometheus systemd service file
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus Service
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/prometheus/prometheus --config.file=/usr/local/bin/prometheus/prometheus.yml
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Reload systemd to read Prometheus service file
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable and start Prometheus service
+      ansible.builtin.service:
+        name: prometheus
+        state: started
+        enabled: yes
+
+- name: Install and Configure Node Exporter
+  hosts: Servers
+  become: yes
+
+  tasks:
+    - name: Download Node Exporter package
+      get_url:
+        url: https://github.com/prometheus/node_exporter/releases/download/v1.2.2/node_exporter-1.2.2.linux-amd64.tar.gz
+        dest: /home/{{ target_username }}/node_exporter-1.2.2.linux-amd64.tar.gz
+
+    - name: Extract Node Exporter package
+      ansible.builtin.unarchive:
+        src: /home/{{ target_username }}/node_exporter-1.2.2.linux-amd64.tar.gz
+        dest: /home/{{ target_username }}/
+        remote_src: yes
+
+    - name: Copy Node Exporter binary to /usr/local/bin
+      copy:
+        src: /home/{{ target_username }}/node_exporter-1.2.2.linux-amd64/
+        dest: /usr/local/bin/node_exporter
+        remote_src: yes
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Create Node Exporter systemd service file
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/local/bin/node_exporter/node_exporter
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Reload systemd to read Node Exporter service file
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable and start Node Exporter service
+      ansible.builtin.service:
+        name: node_exporter
+        state: started
+        enabled: yes
+
+- name: Add blackbox scrape config to prometheus.yml
+  hosts: Servers
+  tasks:
+    - name: Add blackbox scrape config
+      ansible.builtin.lineinfile:
+        path: /usr/local/bin/prometheus/prometheus.yml
+        insertafter: '^  - targets: \["localhost:9090"\]$'
+        line:  "\n  - job_name: 'blackbox'\n    metrics_path: /probe\n    params:\n      module: [http_2xx]\n    static_configs:\n      - targets:\n    relabel_configs:\n      - source_labels: [__address__]\n        target_label: __param_target\n      - source_labels: [__param_target]\n        target_label: instance\n      - target_label: __address__\n        replacement: localhost:9115" 
+
+- name: Install Zabbix repository, MySQL Server, and update packages
+  hosts: Servers
+  become: yes
+
+  vars_prompt:
+    - name: zabbix_password
+      prompt: "Enter the Zabbix database password"
+      private: yes  # This hides the input from the terminal
+  tasks:
+    - name: Download Zabbix repository package
+      get_url:
+        url: https://repo.zabbix.com/zabbix/6.4/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.4-1+ubuntu22.04_all.deb
+        dest: /home/{{ target_username }}/zabbix-release_6.4-1+ubuntu22.04_all.deb
+
+    - name: Install Zabbix repository package
+      apt:
+        deb: /home/{{ target_username }}/zabbix-release_6.4-1+ubuntu22.04_all.deb
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Zabbix server, frontend, and related packages
+      apt:
+        name:
+          - zabbix-server-mysql
+          - zabbix-frontend-php
+          - zabbix-apache-conf
+          - zabbix-sql-scripts
+          - zabbix-agent
+        state: present
+
+    - name: Update apt cache before MySQL installation
+      apt:
+        update_cache: yes
+
+    - name: Install MySQL Server
+      apt:
+        name: mysql-server
+        state: present
+
+    - name: Start MySQL service
+      systemd:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Create Zabbix database, user, and set privileges using expect
+      expect:
+        command: mysql -uroot -p
+        responses:
+          "Enter password:": ""
+          "mysql>": |
+            create database zabbix character set utf8mb4 collate utf8mb4_bin;
+            create user zabbix@localhost identified by '{{ zabbix_password }}';
+            grant all privileges on zabbix.* to zabbix@localhost;
+            set global log_bin_trust_function_creators = 1;
+            quit;
+
+    - name: Copy the Zabbix Script Zip File
+      command: cp /usr/share/zabbix-sql-scripts/mysql/server.sql.gz /home/{{ target_username }}/
+
+    - name: Unzip Zabbix SQL Script
+      command: gunzip /home/{{ target_username }}/server.sql.gz
+
+    - name: Import SQL Script file into MySQL database
+      shell: mysql -uzabbix -p{{ zabbix_password }} zabbix < /home/{{ target_username }}/server.sql
+
+    - name: Create Zabbix database, user, and set privileges using expect
+      expect:
+        command: mysql -uroot -p
+        responses:
+          "Enter password:": ""
+          "mysql>": |
+            set global log_bin_trust_function_creators = 0;
+            quit;
+
+    - name: Copy Configuration Template File
+      template:
+        src: /etc/ansible/config_files/zabbix_server.conf.j2
+        dest: /etc/zabbix/zabbix_server.conf
+        mode: "0600"
+
+    - name: Restart Zabbix Server, Zabbix Agent, and Apache2
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - zabbix-server
+        - zabbix-agent
+        - apache2
+
+    - name: Enable Zabbix Server, Zabbix Agent, and Apache2
+      systemd:
+        name: "{{ item }}"
+        enabled: yes
+      loop:
+        - zabbix-server
+        - zabbix-agent
+        - apache2
+  
+- name: Install and Configure Wazuh Indexer
+  hosts: Servers
+  become: yes
+
+  vars_prompt:
+    - name: node_ip
+      prompt: "Enter the IP address for the Wazuh indexer node"
+    - name: server_ip
+      prompt: "Enter the IP address for the Wazuh server node"
+    - name: dashboard_ip
+      prompt: "Enter the IP address for the Wazuh dashboard node"
+
+  environment:
+    NODE_NAME: "node-1"
+  tasks:
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - gnupg
+        - apt-transport-https
+        - curl
+
+    - name: Download wazuh-certs-tool.sh
+      ansible.builtin.get_url:
+        url: https://packages.wazuh.com/4.7/wazuh-certs-tool.sh
+        dest: /home/{{ target_username }}/wazuh-certs-tool.sh
+        mode: '0755'  # Ensure execute permission
+
+    - name: Copy Configuration File
+      template:
+        src: /etc/ansible/config_files/config.yml.j2  # Path to your local Jinja2 template file
+        dest: /home/{{ target_username }}/config.yml  # Destination path and new name on the remote machine
+        mode: 0644
+
+    - name: Run wazuh-certs-tool.sh -A
+      ansible.builtin.shell: bash /home/{{ target_username }}/wazuh-certs-tool.sh -A
+
+    - name: Create wazuh-certificates.tar
+      ansible.builtin.shell: tar -cvf /home/{{ target_username }}/wazuh-certificates.tar -C /home/{{ target_username }}/wazuh-certificates/ .
+
+    - name: Remove wazuh-certificates directory
+      ansible.builtin.shell: rm -rf /home/{{ target_username }}/wazuh-certificates
+
+    - name: Import Wazuh GPG key
+      ansible.builtin.shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg
+
+    - name: Add Wazuh repository
+      ansible.builtin.shell: |
+        echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | tee -a /etc/apt/sources.list.d/wazuh.list
+
+    - name: Update package information
+      apt:
+        update_cache: yes
+
+    - name: Install wazuh-indexer package
+      ansible.builtin.shell: apt-get -y install wazuh-indexer
+
+    - name: Replace network.host in opensearch.yml
+      ansible.builtin.replace:
+        path: /etc/wazuh-indexer/opensearch.yml
+        regexp: '^network.host: "0.0.0.0"'
+        replace: 'network.host: "{{ node_ip }}"'
+        backup: yes
+
+    - name: Make directory for certificates
+      ansible.builtin.file:
+        path: /etc/wazuh-indexer/certs
+        state: directory
+
+    - name: Extract certificates tar file
+      ansible.builtin.command:
+        cmd: tar -xf /home/{{ target_username }}/wazuh-certificates.tar -C /etc/wazuh-indexer/certs/ ./$NODE_NAME.pem ./$NODE_NAME-key.pem ./admin.pem ./admin-key.pem ./root-ca.pem
+      args:
+        creates: /etc/wazuh-indexer/certs/indexer.pem  # Specify the certificate file path
+
+    - name: Rename indexer certificate
+      ansible.builtin.command:
+        cmd: mv -n /etc/wazuh-indexer/certs/$NODE_NAME.pem /etc/wazuh-indexer/certs/indexer.pem
+      args:
+        creates: /etc/wazuh-indexer/certs/indexer-key.pem  # Specify the certificate key file path
+      changed_when: false  # Avoid indicating changed status if file already exists
+
+    - name: Rename indexer key
+      ansible.builtin.command:
+        cmd: mv -n /etc/wazuh-indexer/certs/$NODE_NAME-key.pem /etc/wazuh-indexer/certs/indexer-key.pem
+      changed_when: false  # Avoid indicating changed status if file already exists
+
+    - name: Set permissions on certs directory
+      ansible.builtin.file:
+        path: /etc/wazuh-indexer/certs
+        mode: "0500"
+
+    - name: Set permissions on certificate files
+      ansible.builtin.file:
+        path: "/etc/wazuh-indexer/certs/{{ item }}"
+        mode: "0400"
+      loop:
+        - admin-key.pem
+        - admin.pem
+        - indexer-key.pem
+        - indexer.pem
+        - root-ca.pem
+
+    - name: Change ownership of certs directory
+      ansible.builtin.file:
+        path: /etc/wazuh-indexer/certs
+        owner: wazuh-indexer
+        group: wazuh-indexer
+        recurse: yes
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable Wazuh Indexer service
+      ansible.builtin.systemd:
+        name: wazuh-indexer
+        enabled: yes
+
+    - name: Start Wazuh Indexer service
+      ansible.builtin.systemd:
+        name: wazuh-indexer
+        state: started
+
+    - name: Run indexer-security-init.sh script
+      ansible.builtin.command: /usr/share/wazuh-indexer/bin/indexer-security-init.sh
+      
+- name: Install and Configure Wazuh Server
+  hosts: Servers
+  become: yes
+
+  environment:
+    NODE_NAME: "wazuh-1"
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - gnupg
+        - apt-transport-https
+        - curl
+
+    - name: Import Wazuh GPG key
+      ansible.builtin.shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg
+
+    - name: Add Wazuh repository
+      ansible.builtin.shell: |
+        echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | tee -a /etc/apt/sources.list.d/wazuh.list
+
+    - name: Update package information
+      apt:
+        update_cache: yes
+
+    - name: Install Wazuh Manager
+      ansible.builtin.apt:
+        name: wazuh-manager
+        state: present
+
+    - name: Enable and start Wazuh Manager service
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        daemon_reload: yes
+        enabled: yes
+        state: started
+
+    - name: Install Filebeat
+      ansible.builtin.apt:
+        name: filebeat
+        state: present
+
+    - name: Copy Filebeat configuration file
+      template:
+        src: /etc/ansible/config_files/filebeat.yml.j2  # Path to your local Jinja2 template file
+        dest: /etc/filebeat/filebeat.yml  # Destination path and new name on the remote machine
+        mode: "0644"  # Permissions for the file on the remote machine
+
+    - name: Create Filebeat keystore for credentials
+      ansible.builtin.shell: "filebeat keystore create"
+
+    - name: Add default username to Filebeat keystore
+      ansible.builtin.shell: "echo admin | filebeat keystore add username --stdin --force"
+
+    - name: Add default password to Filebeat keystore
+      ansible.builtin.shell: "echo admin | filebeat keystore add password --stdin --force"
+
+    - name: Download Wazuh Alerts Template
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/wazuh/wazuh/v4.7.3/extensions/elasticsearch/7.x/wazuh-template.json"
+        dest: "/etc/filebeat/wazuh-template.json"
+        mode: '0644'
+
+    - name: Set Permissions for Wazuh Alerts Template
+      ansible.builtin.file:
+        path: "/etc/filebeat/wazuh-template.json"
+        mode: 'go+r'
+
+    - name: Install Wazuh Module for Filebeat
+      ansible.builtin.shell: "curl -s https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-0.3.tar.gz | tar -xvz -C /usr/share/filebeat/module"
+
+    - name: Create certs directory
+      ansible.builtin.file:
+        path: /etc/filebeat/certs
+        state: directory
+        mode: '0755'
+      register: mkdir_result
+
+    - name: Extract Certificate Files
+      ansible.builtin.command:
+        cmd: "tar -xf /home/{{ target_username }}/wazuh-certificates.tar -C /etc/filebeat/certs/ ./$NODE_NAME.pem ./$NODE_NAME-key.pem ./root-ca.pem"
+      when: mkdir_result is succeeded
+
+    - name: Rename PEM file
+      ansible.builtin.command:
+        cmd: "mv -n /etc/filebeat/certs/$NODE_NAME.pem /etc/filebeat/certs/filebeat.pem"
+      when: mkdir_result is succeeded
+
+    - name: Rename KEY file
+      ansible.builtin.command:
+        cmd: "mv -n /etc/filebeat/certs/$NODE_NAME-key.pem /etc/filebeat/certs/filebeat-key.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of certs directory
+      ansible.builtin.file:
+        path: /etc/filebeat/certs
+        mode: '0500'
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of PEM file
+      ansible.builtin.command:
+        cmd: "chmod 400 /etc/filebeat/certs/filebeat.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of KEY file
+      ansible.builtin.command:
+        cmd: "chmod 400 /etc/filebeat/certs/filebeat-key.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of ROOT file
+      ansible.builtin.command:
+        cmd: "chmod 400 /etc/filebeat/certs/root-ca.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change owner of certs directory
+      ansible.builtin.command:
+        cmd: "chown -R root:root /etc/filebeat/certs"
+      when: mkdir_result is succeeded
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable Filebeat service
+      ansible.builtin.service:
+        name: filebeat
+        enabled: yes
+
+    - name: Start Filebeat service
+      ansible.builtin.service:
+        name: filebeat
+        state: started
+
+- name: Install and Configure Wazuh Dashboard
+  hosts: Servers
+  become: yes
+
+  environment:
+    NODE_NAME: "dashboard"
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - gnupg
+        - apt-transport-https
+        - debhelper
+        - tar
+        - curl
+        - libcap2-bin
+
+    - name: Import Wazuh GPG key
+      ansible.builtin.shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg
+
+    - name: Add Wazuh repository
+      ansible.builtin.shell: |
+        echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | tee -a /etc/apt/sources.list.d/wazuh.list
+
+    - name: Update package information
+      apt:
+        update_cache: yes
+
+    - name: Install Wazuh Dashboard
+      ansible.builtin.shell:
+        cmd: "apt-get -y install wazuh-dashboard"
+
+    - name: Copy Dashboard Configuration File
+      template:
+        src: /etc/ansible/config_files/opensearch_dashboards.yml.j2  # Path to your local Jinja2 template file
+        dest: /etc/wazuh-dashboard/opensearch_dashboards.yml  # Destination path and new name on the remote machine
+        mode: "0644"  # Permissions for the file on the remote machine
+
+    - name: Create certs directory
+      ansible.builtin.file:
+        path: "/etc/wazuh-dashboard/certs"
+        state: directory
+
+    - name: Extract certificates
+      ansible.builtin.shell:
+        cmd: "tar -xf /home/{{ target_username }}/wazuh-certificates.tar -C /etc/wazuh-dashboard/certs/ ./$NODE_NAME.pem ./$NODE_NAME-key.pem ./root-ca.pem"
+
+    - name: Rename certificate files
+      ansible.builtin.shell:
+        cmd: "mv -n /etc/wazuh-dashboard/certs/$NODE_NAME.pem /etc/wazuh-dashboard/certs/dashboard.pem && mv -n /etc/wazuh-dashboard/certs/$NODE_NAME-key.pem /etc/wazuh-dashboard/certs/dashboard-key.pem"
+
+    - name: Set permissions for certs directory
+      ansible.builtin.file:
+        path: "/etc/wazuh-dashboard/certs"
+        mode: "0500"
+
+    - name: Set permissions on certificate files
+      ansible.builtin.file:
+        path: "/etc/wazuh-dashboard/certs/{{ item }}"
+        mode: "0400"
+      loop:
+        - dashboard-key.pem
+        - dashboard.pem
+        - root-ca.pem
+
+    - name: Change ownership of certs directory
+      ansible.builtin.shell:
+        cmd: "chown -R wazuh-dashboard:wazuh-dashboard /etc/wazuh-dashboard/certs"
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable Wazuh Dashboard service
+      ansible.builtin.service:
+        name: wazuh-dashboard
+        enabled: yes
+
+    - name: Start Wazuh Dashboard service
+      ansible.builtin.service:
+        name: wazuh-dashboard
+        state: started

@@ -1,0 +1,63 @@
+---
+- name: Install InfluxDB and create user and bucket
+  hosts: Servers
+  become: true
+  tasks:
+    - name: Install curl package
+      ansible.builtin.apt:
+        name: curl
+        state: present
+
+    - name: Download InfluxDB deb package
+      ansible.builtin.get_url:
+        url: https://dl.influxdata.com/influxdb/releases/influxdb2_2.7.5-1_amd64.deb
+        dest: /home/{{ target_username }}/influxdb2_2.7.5-1_amd64.deb
+
+    - name: Install InfluxDB deb package
+      ansible.builtin.command: dpkg -i /home/{{ target_username }}/influxdb2_2.7.5-1_amd64.deb
+
+    - name: Ensure InfluxDB service is running
+      ansible.builtin.service:
+        name: influxdb
+        state: started
+        enabled: yes
+
+    - name: Install InfluxDB CLI
+      ansible.builtin.package:
+        name: influxdb-client
+        state: present
+
+- name: Create user and bucket in InfluxDB from user input
+  hosts: Servers
+  vars_prompt:
+    - name: influx_username
+      prompt: "Enter InfluxDB username"
+      private: no
+    - name: influx_password
+      prompt: "Enter InfluxDB password"
+      private: yes
+    - name: influx_organization
+      prompt: "Enter InfluxDB organization name"
+      private: no
+    - name: influx_bucket_name
+      prompt: "Enter InfluxDB bucket name"
+      private: no
+    - name: influx_retention
+      prompt: "Enter retention period for the bucket (e.g., 30d)"
+      private: no
+  tasks:
+    - name: Create InfluxDB user
+      ansible.builtin.command: >
+        influx user create -n "{{ influx_username }}" -p "{{ influx_password }}" -o "{{ influx_organization }}"
+      environment:
+        INFLUX_PASSWORD: "{{ influx_password }}"
+      register: create_user_result
+      changed_when: "'User' in create_user_result.stdout"
+
+    - name: Create InfluxDB bucket
+      ansible.builtin.command: >
+        influx bucket create -n "{{ influx_bucket_name }}" -r "{{ influx_retention }}" -o "{{ influx_organization }}"
+      environment:
+        INFLUX_PASSWORD: "{{ influx_password }}"
+      register: create_bucket_result
+      changed_when: "'Bucket' in create_bucket_result.stdout"
